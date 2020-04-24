@@ -683,3 +683,57 @@ func TestSeitanMultipleRequestForOneInvite(t *testing.T) {
 	require.True(t, team.IsMember(context.TODO(), users[0].GetUserVersion()))
 	require.False(t, team.IsMember(context.TODO(), users[1].GetUserVersion()))
 }
+
+func TestAcceptingMultipleSeitanV2ForOneTeam(t *testing.T) {
+	// Test one user accepting multiple seitan v2 tokens for one team.
+
+	tc := SetupTest(t, "team", 1)
+	defer tc.Cleanup()
+
+	tc.Tp.SkipSendingSystemChatMessages = true
+	admin := kbtest.TCreateFakeUser(tc)
+
+	teamName, teamID := createTeam2(tc)
+
+	var ikeys [2]keybase1.SeitanIKeyV2
+	for i := range ikeys {
+		token, err := CreateSeitanTokenV2(tc.Context(), tc.G, teamName.String(),
+			keybase1.TeamRole_WRITER, keybase1.SeitanKeyLabel{})
+		require.NoError(t, err)
+		ikeys[i] = token
+	}
+
+	user := kbtest.TCreateFakeUser(tc)
+
+	timeNow := keybase1.ToTime(tc.G.Clock().Now())
+
+	var seitans [2]keybase1.TeamSeitanRequest
+	for i := range seitans {
+		token := SeitanIKeyV2(ikeys[i])
+		seitanRet, err := generateAcceptanceSeitanV2(token, user.GetUserVersion(), timeNow)
+		require.NoError(t, err)
+
+		err = postSeitanV2(tc.MetaContext(), seitanRet)
+		require.NoError(t, err)
+
+		inviteID, err := seitanRet.inviteID.TeamInviteID()
+		require.NoError(t, err)
+
+		seitans[i] = keybase1.TeamSeitanRequest{
+			InviteID:    inviteID,
+			Uid:         user.GetUID(),
+			EldestSeqno: user.EldestSeqno,
+			Akey:        keybase1.SeitanAKey(seitanRet.encoded),
+			Role:        keybase1.TeamRole_WRITER,
+			UnixCTime:   int64(timeNow),
+		}
+	}
+
+	kbtest.LogoutAndLoginAs(tc, admin)
+	msg := keybase1.TeamSeitanMsg{
+		TeamID:  teamID,
+		Seitans: seitans[:],
+	}
+	err := HandleTeamSeitan(context.Background(), tc.G, msg)
+	require.NoError(t, err)
+}

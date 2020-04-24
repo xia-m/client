@@ -702,3 +702,57 @@ func TestSeitanInviteLinkPukless(t *testing.T) {
 	uvs := team.AllUserVersionsByUID(context.Background(), user.GetUID())
 	require.Len(t, uvs, 0, "Expected user not to end up in a team as cryptomember (?)")
 }
+
+func TestAcceptMultipleInviteLinkForOneTeam(t *testing.T) {
+	// Test one user accepting multiple invite links tokens for one team.
+
+	tc := SetupTest(t, "team", 1)
+	defer tc.Cleanup()
+
+	tc.Tp.SkipSendingSystemChatMessages = true
+	admin := kbtest.TCreateFakeUser(tc)
+
+	teamName, teamID := createTeam2(tc)
+
+	var ilinks [2]keybase1.Invitelink
+	for i := range ilinks {
+		maxUses := keybase1.TeamMaxUsesInfinite
+		token, err := CreateInvitelink(tc.MetaContext(), teamName.String(),
+			keybase1.TeamRole_WRITER, maxUses, nil /* etime */)
+		require.NoError(t, err)
+		ilinks[i] = token
+	}
+
+	user := kbtest.TCreateFakeUser(tc)
+
+	uv := user.GetUserVersion()
+	unixNow := tc.G.Clock().Now().Unix()
+
+	var seitans [2]keybase1.TeamSeitanRequest
+	for i := range seitans {
+		seitanRet, err := generateAcceptanceSeitanInviteLink(ilinks[i].Ikey, uv, unixNow)
+
+		err = postSeitanInviteLink(tc.MetaContext(), seitanRet)
+		require.NoError(t, err)
+
+		inviteID, err := seitanRet.inviteID.TeamInviteID()
+		require.NoError(t, err)
+
+		seitans[i] = keybase1.TeamSeitanRequest{
+			InviteID:    inviteID,
+			Uid:         user.GetUID(),
+			EldestSeqno: user.EldestSeqno,
+			Akey:        keybase1.SeitanAKey(seitanRet.encoded),
+			Role:        keybase1.TeamRole_WRITER,
+			UnixCTime:   unixNow,
+		}
+	}
+
+	kbtest.LogoutAndLoginAs(tc, admin)
+	msg := keybase1.TeamSeitanMsg{
+		TeamID:  teamID,
+		Seitans: seitans[:],
+	}
+	err := HandleTeamSeitan(context.Background(), tc.G, msg)
+	require.NoError(t, err)
+}
