@@ -57,7 +57,7 @@ func TestTeamInviteStubbing(t *testing.T) {
 	require.NoError(t, err)
 
 	// User 2 loads team
-	teamObj2, err := Load(tc.Context(), tc2.G, keybase1.LoadTeamArg{
+	teamObj2, err := Load(tc2.Context(), tc2.G, keybase1.LoadTeamArg{
 		Name:      teamname,
 		NeedAdmin: false,
 	})
@@ -659,11 +659,20 @@ func TestAcceptMultipleInviteLinkForOneTeam(t *testing.T) {
 
 	teamName, teamID := createTeam2(tc)
 
-	var ilinks [2]keybase1.Invitelink
+	// Make 3 seitan invite links with different roles. User will accept all 3
+	// of them, but they should be added as the highest role, and other
+	// requests should be rejected.
+	inviteRoles := [3]keybase1.TeamRole{
+		keybase1.TeamRole_READER,
+		keybase1.TeamRole_WRITER,
+		keybase1.TeamRole_READER,
+	}
+
+	var ilinks [3]keybase1.Invitelink
 	for i := range ilinks {
 		maxUses := keybase1.TeamMaxUsesInfinite
 		token, err := CreateInvitelink(tc.MetaContext(), teamName.String(),
-			keybase1.TeamRole_WRITER, maxUses, nil /* etime */)
+			inviteRoles[i], maxUses, nil /* etime */)
 		require.NoError(t, err)
 		ilinks[i] = token
 	}
@@ -673,7 +682,8 @@ func TestAcceptMultipleInviteLinkForOneTeam(t *testing.T) {
 	uv := user.GetUserVersion()
 	unixNow := tc.G.Clock().Now().Unix()
 
-	var seitans [2]keybase1.TeamSeitanRequest
+	var inviteIDs [3]keybase1.TeamInviteID
+	var seitans [3]keybase1.TeamSeitanRequest
 	for i := range seitans {
 		seitanRet, err := generateAcceptanceSeitanInviteLink(ilinks[i].Ikey, uv, unixNow)
 
@@ -691,6 +701,8 @@ func TestAcceptMultipleInviteLinkForOneTeam(t *testing.T) {
 			Role:        keybase1.TeamRole_WRITER,
 			UnixCTime:   unixNow,
 		}
+
+		inviteIDs[i] = inviteID
 	}
 
 	kbtest.LogoutAndLoginAs(tc, admin)
@@ -699,5 +711,114 @@ func TestAcceptMultipleInviteLinkForOneTeam(t *testing.T) {
 		Seitans: seitans[:],
 	}
 	err := HandleTeamSeitan(context.Background(), tc.G, msg)
+	require.NoError(t, err)
+
+	// Check if user was added with correct role and if invites have expected
+	// statuses.
+	teamObj, err := loadTeamForAdmin(tc, teamName.String())
+	require.NoError(t, err)
+
+	memberRole, err := teamObj.MemberRole(tc.Context(), user.GetUserVersion())
+	require.NoError(t, err)
+	require.Equal(t, keybase1.TeamRole_WRITER, memberRole)
+
+	// All invites were infinite uses, they should still be active.
+	require.Equal(t, 3, teamObj.NumActiveInvites())
+
+	for i, inviteID := range inviteIDs {
+		_, found := teamObj.chain().FindActiveInviteMDByID(inviteID)
+		require.False(t, found)
+
+		md := teamObj.chain().inner.InviteMetadatas[inviteID]
+		statusCode, err := md.Status.Code()
+		require.NoError(t, err)
+		require.Equal(t, keybase1.TeamInviteMetadataStatusCode_ACTIVE, statusCode)
+
+		switch i {
+		case 0, 2:
+			require.Len(t, md.UsedInvites, 0)
+		case 1:
+			// Invite 1 should have been used to add user.
+			require.Len(t, md.UsedInvites, 1)
+		}
+	}
+}
+
+func TestAcceptMultipleInviteLinkForTeamUpgrade(t *testing.T) {
+	// Similar to TestAcceptMultipleInviteLinkForOneTeam, but user is already
+	// in the team as READER, and uses three distinct invite links - READER
+	// (1), WRITER (2), WRITER (3). It should upgrade them to WRITER using
+	// invite (2), and reject requests for invites (1) and (3).
+
+	// Skipping because it's not possible to use an invite link to upgrade
+	// yourself right now - server prevents accepting an invite link if you are
+	// already in the team.
+	t.Skip()
+
+	tc := SetupTest(t, "team", 1)
+	defer tc.Cleanup()
+
+	tc.Tp.SkipSendingSystemChatMessages = true
+	user := kbtest.TCreateFakeUser(tc)
+	admin := kbtest.TCreateFakeUser(tc)
+
+	teamName, teamID := createTeam2(tc)
+
+	// Make 3 seitan invite links with different roles. User will accept all 3
+	// of them, but they should be added as the highest role, and other
+	// requests should be rejected.
+	inviteRoles := [3]keybase1.TeamRole{
+		keybase1.TeamRole_READER,
+		keybase1.TeamRole_WRITER,
+		keybase1.TeamRole_WRITER,
+	}
+
+	var ilinks [3]keybase1.Invitelink
+	for i := range ilinks {
+		maxUses := keybase1.TeamMaxUsesInfinite
+		token, err := CreateInvitelink(tc.MetaContext(), teamName.String(),
+			inviteRoles[i], maxUses, nil /* etime */)
+		require.NoError(t, err)
+		ilinks[i] = token
+	}
+
+	_, err := AddMemberByID(tc.Context(), tc.G, teamID, user.Username, keybase1.TeamRole_READER,
+		nil /* botSettings */, nil /* emailMsg */)
+	require.NoError(t, err)
+
+	kbtest.LogoutAndLoginAs(tc, user)
+
+	uv := user.GetUserVersion()
+	unixNow := tc.G.Clock().Now().Unix()
+
+	var inviteIDs [3]keybase1.TeamInviteID
+	var seitans [3]keybase1.TeamSeitanRequest
+	for i := range seitans {
+		seitanRet, err := generateAcceptanceSeitanInviteLink(ilinks[i].Ikey, uv, unixNow)
+
+		err = postSeitanInviteLink(tc.MetaContext(), seitanRet)
+		require.NoError(t, err)
+
+		inviteID, err := seitanRet.inviteID.TeamInviteID()
+		require.NoError(t, err)
+
+		seitans[i] = keybase1.TeamSeitanRequest{
+			InviteID:    inviteID,
+			Uid:         user.GetUID(),
+			EldestSeqno: user.EldestSeqno,
+			Akey:        keybase1.SeitanAKey(seitanRet.encoded),
+			Role:        keybase1.TeamRole_WRITER,
+			UnixCTime:   unixNow,
+		}
+
+		inviteIDs[i] = inviteID
+	}
+
+	kbtest.LogoutAndLoginAs(tc, admin)
+	msg := keybase1.TeamSeitanMsg{
+		TeamID:  teamID,
+		Seitans: seitans[:],
+	}
+	err = HandleTeamSeitan(context.Background(), tc.G, msg)
 	require.NoError(t, err)
 }

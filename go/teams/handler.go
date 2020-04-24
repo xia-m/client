@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sort"
 
+	"github.com/davecgh/go-spew/spew"
 	"github.com/keybase/client/go/engine"
 	"github.com/keybase/client/go/gregor"
 	"github.com/keybase/client/go/libkb"
@@ -562,67 +564,46 @@ type chatSeitanRecip struct {
 }
 
 func HandleTeamSeitan(ctx context.Context, g *libkb.GlobalContext, msg keybase1.TeamSeitanMsg) (err error) {
-	ctx = libkb.WithLogTag(ctx, "SEIT")
-	mctx := libkb.NewMetaContext(ctx, g)
+	mctx := libkb.NewMetaContext(libkb.WithLogTag(ctx, "SEIT"), g)
 	defer mctx.Trace("HandleTeamSeitan", &err)()
+	_, err = internalHandleTeamSeitan(mctx, msg)
+	return err
+}
 
-	team, err := Load(ctx, g, keybase1.LoadTeamArg{
+func internalHandleTeamSeitan(mctx libkb.MetaContext, msg keybase1.TeamSeitanMsg) ([]keybase1.TeamSeitanRequest, error) {
+	team, err := Load(mctx.Ctx(), mctx.G(), keybase1.LoadTeamArg{
 		ID:          msg.TeamID,
 		Public:      msg.TeamID.IsPublic(),
 		ForceRepoll: true,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	var chats []chatSeitanRecip
-
-	// we only reject invalid or used up invites after the transaction was
-	// correctly submitted.
-	var invitesToReject []keybase1.TeamSeitanRequest
+	if len(msg.Seitans) == 0 {
+		mctx.Debug("got an empty list, returning")
+		return nil, nil
+	}
 
 	// Only allow crypto-members added through 'team.change_membership' to be
 	// added for Seitan invites (AllowPUKless=false).
 	tx := CreateAddMemberTx(team)
+	tx.AllowRoleChanges = true // allow role upgrades using this tx
 
-	for _, seitan := range msg.Seitans {
-		inviteMD, found := team.chain().FindActiveInviteMDByID(seitan.InviteID)
+	type SeitanRequestWithInvite struct {
+		invite   keybase1.TeamInvite
+		request  keybase1.TeamSeitanRequest
+		newStyle bool
+	}
+
+	seitans := make([]SeitanRequestWithInvite, 0, len(msg.Seitans))
+	for _, req := range msg.Seitans {
+		inviteMD, found := team.chain().FindActiveInviteMDByID(req.InviteID)
 		if !found {
-			mctx.Debug("Couldn't find specified invite id %q; skipping", seitan.InviteID)
+			mctx.Debug("Couldn't find specified invite id %q; skipping", req.InviteID)
 			continue
 		}
 		invite := inviteMD.Invite
-
-		mctx.Debug("Processing Seitan acceptance for invite %s", invite.Id)
-
-		err := verifySeitanSingle(ctx, g, team, invite, seitan)
-		if err != nil {
-			if _, ok := err.(InviteLinkAcceptanceError); ok {
-				mctx.Debug("Provided AKey failed to verify with error: %v; ignoring and scheduling for rejection", err)
-				invitesToReject = append(invitesToReject, seitan)
-			} else {
-				mctx.Debug("Provided AKey failed to verify with error: %v; ignoring", err)
-			}
-			continue
-		}
-
-		uv := NewUserVersion(seitan.Uid, seitan.EldestSeqno)
-		currentRole, err := team.MemberRole(ctx, uv)
-		if err != nil {
-			mctx.Debug("Failure in team.MemberRole: %v", err)
-			return err
-		}
-
-		err = tx.CanConsumeInvite(ctx, invite.Id)
-		if err != nil {
-			if _, ok := err.(InviteLinkAcceptanceError); ok {
-				mctx.Debug("Can't use invite: %s; ignoring and scheduling for rejection", err)
-				invitesToReject = append(invitesToReject, seitan)
-			} else {
-				mctx.Debug("Can't use invite: %s", err)
-			}
-			continue
-		}
 
 		isNewStyle, err := IsNewStyleInvite(invite)
 		if err != nil {
@@ -630,19 +611,82 @@ func HandleTeamSeitan(ctx context.Context, g *libkb.GlobalContext, msg keybase1.
 			continue
 		}
 
-		if currentRole.IsOrAbove(invite.Role) {
-			mctx.Debug("User already has same or higher role.")
-			if !isNewStyle {
-				mctx.Debug("User already has same or higher role; since is not a new-style invite, cancelling invite.")
-				tx.CancelInvite(invite.Id, uv.Uid)
+		seitans = append(seitans, SeitanRequestWithInvite{
+			invite:   invite,
+			request:  req,
+			newStyle: isNewStyle,
+		})
+	}
+
+	// Sort by roles, highest first.
+	sort.SliceStable(seitans, func(i, j int) bool {
+		roleI := seitans[i].invite.Role
+		roleJ := seitans[j].invite.Role
+		return !roleJ.IsOrAbove(roleI)
+	})
+
+	var chats []chatSeitanRecip
+
+	// Seitans to reject (indices in seitans), either rejects acceptance (if
+	// new-style) or cancels invite.
+	var invitesToReject []int
+
+	// Map of users already added. Because we are sorting by roles, if we add
+	// someone, we can reject any further requests by them, because they will
+	// be same or lower role.
+	usersAdded := make(map[keybase1.UID]bool)
+
+	for i, seitan := range seitans {
+		invite := seitan.invite
+		request := seitan.request
+
+		mctx.Debug("Processing Seitan acceptance for invite: %s UID: %s", invite.Id, request.Uid)
+
+		err := verifySeitanSingle(mctx.Ctx(), mctx.G(), team, invite, request)
+		if err != nil {
+			if _, ok := err.(InviteLinkAcceptanceError); ok {
+				mctx.Debug("Provided AKey failed to verify with error: %v; ignoring and scheduling for rejection", err)
+				invitesToReject = append(invitesToReject, i)
 			} else {
-				mctx.Debug("User already has same or higher role; scheduling for rejection.")
-				invitesToReject = append(invitesToReject, seitan)
+				mctx.Debug("Provided AKey failed to verify with error: %v; ignoring", err)
 			}
 			continue
 		}
 
-		err = tx.AddMemberByUV(ctx, uv, invite.Role, nil)
+		if usersAdded[request.Uid] {
+			mctx.Debug(
+				"This user is already being added in this transaction, skipping request for invite: %s",
+				invite.Id)
+			invitesToReject = append(invitesToReject, i)
+			continue
+		}
+
+		uv := NewUserVersion(request.Uid, request.EldestSeqno)
+		currentRole, err := team.MemberRole(mctx.Ctx(), uv)
+		if err != nil {
+			mctx.Debug("Failure in team.MemberRole: %v", err)
+			return nil, err
+		}
+
+		err = tx.CanConsumeInvite(mctx.Ctx(), invite.Id)
+		if err != nil {
+			if _, ok := err.(InviteLinkAcceptanceError); ok {
+				mctx.Debug("Can't use invite: %s; ignoring and scheduling for rejection", err)
+				invitesToReject = append(invitesToReject, i)
+			} else {
+				mctx.Debug("Can't use invite: %s", err)
+			}
+			continue
+		}
+
+		if currentRole.IsOrAbove(invite.Role) {
+			mctx.Debug("User already has same or higher role; scheduling for rejection.")
+			invitesToReject = append(invitesToReject, i)
+			continue
+		}
+
+		mctx.Debug("Everything looks good - adding %s to transaction", uv.String())
+		err = tx.AddMemberByUV(mctx.Ctx(), uv, invite.Role, nil)
 		if err != nil {
 			mctx.Debug("Failed to add %v to transaction: %v", uv, err)
 			continue
@@ -653,7 +697,8 @@ func HandleTeamSeitan(ctx context.Context, g *libkb.GlobalContext, msg keybase1.
 		// PUKless user accepts seitan token invite status is set to
 		// WAITING_FOR_PUK and team_rekeyd hold on it till user gets a
 		// PUK and status is set to ACCEPTED.
-		err = tx.ConsumeInviteByID(ctx, invite.Id, uv)
+		mctx.Debug("Consuming invite ID %s", invite.Id)
+		err = tx.ConsumeInviteByID(mctx.Ctx(), invite.Id, uv)
 		if err != nil {
 			mctx.Debug("Failed to consume invite: %v", err)
 			continue
@@ -661,34 +706,57 @@ func HandleTeamSeitan(ctx context.Context, g *libkb.GlobalContext, msg keybase1.
 
 		chats = append(chats, chatSeitanRecip{
 			inviter: invite.Inviter.Uid,
-			invitee: seitan.Uid,
+			invitee: request.Uid,
 			role:    invite.Role,
 		})
+
+		usersAdded[request.Uid] = true
 	}
 
+	// Handle all old-style invite "rejections" which are done by canceling
+	// invites.
+	for _, index := range invitesToReject {
+		seitan := seitans[index]
+		if !seitan.newStyle {
+			tx.CancelInvite(seitan.invite.Id, seitan.request.Uid)
+		}
+	}
+
+	spew.Dump(tx.DebugPayloads())
 	if tx.IsEmpty() {
 		mctx.Debug("Transaction is empty - nothing to post")
 	} else {
 		err = tx.Post(mctx)
 		if err != nil {
-			return fmt.Errorf("HandleTeamSeitan: Error posting transaction: %w", err)
+			return nil, fmt.Errorf("HandleTeamSeitan: Error posting transaction: %w", err)
 		}
 
 		// Send chats
+		teamName := team.Name().String()
 		for _, chat := range chats {
-			mctx.Debug("sending welcome message for successful Seitan handle: inviter: %s invitee: %s, role: %v",
+			mctx.Debug(
+				"sending welcome message for successful Seitan handle: inviter: %s invitee: %s, role: %v",
 				chat.inviter, chat.invitee, chat.role)
-			SendChatInviteWelcomeMessage(ctx, g, team.Name().String(), keybase1.TeamInviteCategory_SEITAN,
+			SendChatInviteWelcomeMessage(mctx.Ctx(), mctx.G(), teamName, keybase1.TeamInviteCategory_SEITAN,
 				chat.inviter, chat.invitee, chat.role)
 		}
 	}
 
-	if err = rejectInviteLinkAcceptances(mctx, invitesToReject); err != nil {
-		// the transaction posted correctly, and rejecting an invite is not a critical step, so just log and swallow the error
-		mctx.Debug("HandleTeamSeitan: error rejecting invite acceptances: %v", err)
+	{
+		// Make list of requests for invite link rejections.
+		var requestsToReject []keybase1.TeamSeitanRequest
+		for _, index := range invitesToReject {
+			if seitans[index].newStyle {
+				requestsToReject = append(requestsToReject, seitans[index].request)
+			}
+		}
+		if err = rejectInviteLinkAcceptances(mctx, requestsToReject); err != nil {
+			// the transaction posted correctly, and rejecting an invite is not a critical step, so just log and swallow the error
+			mctx.Debug("HandleTeamSeitan: error rejecting invite acceptances: %v", err)
+		}
 	}
 
-	return nil
+	return nil, nil
 }
 
 func rejectInviteLinkAcceptances(mctx libkb.MetaContext, requests []keybase1.TeamSeitanRequest) error {
