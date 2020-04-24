@@ -19,10 +19,7 @@ func TestTransactions1(t *testing.T) {
 	tc, owner, other, _, name := memberSetupMultiple(t)
 	defer tc.Cleanup()
 
-	team, err := Load(context.Background(), tc.G, keybase1.LoadTeamArg{
-		Name:      name,
-		NeedAdmin: true,
-	})
+	team, err := loadTeamForAdmin(tc, name)
 	require.NoError(t, err)
 
 	tx := CreateAddMemberTx(team)
@@ -85,10 +82,7 @@ func TestDuplicateUidsInTransactions(t *testing.T) {
 	_ = kbtest.TCreateFakeUser(tc)
 
 	teamname := createTeam(tc)
-	team, err := Load(context.Background(), tc.G, keybase1.LoadTeamArg{
-		Name:      teamname,
-		NeedAdmin: true,
-	})
+	team, err := loadTeamForAdmin(tc, teamname)
 	require.NoError(t, err)
 
 	tx := CreateAddMemberTx(team)
@@ -108,11 +102,7 @@ func TestTransactionRotateKey(t *testing.T) {
 	defer tc.Cleanup()
 
 	loadTeam := func() *Team {
-		team, err := Load(context.Background(), tc.G, keybase1.LoadTeamArg{
-			Name:        name,
-			NeedAdmin:   true,
-			ForceRepoll: true,
-		})
+		team, err := loadTeamForAdmin(tc, name)
 		require.NoError(t, err)
 		return team
 	}
@@ -193,10 +183,7 @@ func TestAllowPukless(t *testing.T) {
 	tc, _, other, teamname := setupPuklessInviteTest(t)
 	defer tc.Cleanup()
 
-	team, err := Load(context.Background(), tc.G, keybase1.LoadTeamArg{
-		Name:      teamname,
-		NeedAdmin: true,
-	})
+	team, err := loadTeamForAdmin(tc, teamname)
 	require.NoError(t, err)
 
 	assertError := func(err error) {
@@ -241,10 +228,7 @@ func TestPostAllowPUKless(t *testing.T) {
 	tc, _, other, teamname := setupPuklessInviteTest(t)
 	defer tc.Cleanup()
 
-	team, err := Load(context.Background(), tc.G, keybase1.LoadTeamArg{
-		Name:      teamname,
-		NeedAdmin: true,
-	})
+	team, err := loadTeamForAdmin(tc, teamname)
 	require.NoError(t, err)
 
 	tx := CreateAddMemberTx(team)

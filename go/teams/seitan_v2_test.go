@@ -430,12 +430,8 @@ func TestTeamInviteSeitanV2Failures(t *testing.T) {
 
 	tc.Tp.SkipSendingSystemChatMessages = true
 
-	user2, err := kbtest.CreateAndSignupFakeUser("team", tc.G)
-	require.NoError(t, err)
-	kbtest.Logout(tc)
-
-	admin, err := kbtest.CreateAndSignupFakeUser("team", tc.G)
-	require.NoError(t, err)
+	user2 := kbtest.TCreateFakeUser(tc)
+	admin := kbtest.TCreateFakeUser(tc)
 
 	teamName, teamID := createTeam2(tc)
 	t.Logf("Created team %q", teamName.String())
@@ -601,8 +597,7 @@ func TestSeitanMultipleRequestForOneInvite(t *testing.T) {
 
 	tc.Tp.SkipSendingSystemChatMessages = true
 
-	admin, err := kbtest.CreateAndSignupFakeUser("team", tc.G)
-	require.NoError(t, err)
+	admin := kbtest.TCreateFakeUser(tc)
 
 	teamName, teamID := createTeam2(tc)
 
@@ -613,11 +608,7 @@ func TestSeitanMultipleRequestForOneInvite(t *testing.T) {
 	// Create two users
 	var users [2]*kbtest.FakeUser
 	for i := range users {
-		kbtest.Logout(tc)
-
-		user, err := kbtest.CreateAndSignupFakeUser("team", tc.G)
-		require.NoError(t, err)
-		users[i] = user
+		users[i] = kbtest.TCreateFakeUser(tc)
 	}
 
 	timeNow := keybase1.ToTime(tc.G.Clock().Now())
