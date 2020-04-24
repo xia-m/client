@@ -770,8 +770,8 @@ func handleTeamSeitanInternal(mctx libkb.MetaContext, msg keybase1.TeamSeitanMsg
 		}
 	}
 
-	if len(invitesToReject) > 0 {
-		mctx.Debug("trying to reject %d requests", len(invitesToReject))
+	if len(requestsToReject) > 0 {
+		mctx.Debug("trying to reject %d requests", len(requestsToReject))
 		if err = rejectInviteLinkAcceptances(mctx, requestsToReject); err != nil {
 			// the transaction posted correctly, and rejecting an invite is not a critical step, so just log and swallow the error
 			mctx.Debug("error rejecting invite acceptances: %v", err)
