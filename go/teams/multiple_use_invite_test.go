@@ -727,7 +727,7 @@ func TestAcceptMultipleInviteLinkForOneTeam(t *testing.T) {
 
 	for i, inviteID := range inviteIDs {
 		_, found := teamObj.chain().FindActiveInviteMDByID(inviteID)
-		require.False(t, found)
+		require.True(t, found)
 
 		md := teamObj.chain().inner.InviteMetadatas[inviteID]
 		statusCode, err := md.Status.Code()
