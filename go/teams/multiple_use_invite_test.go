@@ -686,6 +686,7 @@ func TestAcceptMultipleInviteLinkForOneTeam(t *testing.T) {
 	var seitans [3]keybase1.TeamSeitanRequest
 	for i := range seitans {
 		seitanRet, err := generateAcceptanceSeitanInviteLink(ilinks[i].Ikey, uv, unixNow)
+		require.NoError(t, err)
 
 		err = postSeitanInviteLink(tc.MetaContext(), seitanRet)
 		require.NoError(t, err)
@@ -795,6 +796,7 @@ func TestAcceptMultipleInviteLinkForTeamUpgrade(t *testing.T) {
 	var seitans [3]keybase1.TeamSeitanRequest
 	for i := range seitans {
 		seitanRet, err := generateAcceptanceSeitanInviteLink(ilinks[i].Ikey, uv, unixNow)
+		require.NoError(t, err)
 
 		err = postSeitanInviteLink(tc.MetaContext(), seitanRet)
 		require.NoError(t, err)
