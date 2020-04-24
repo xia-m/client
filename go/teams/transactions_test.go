@@ -7,6 +7,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/keybase/client/go/kbtest"
+
 	"github.com/keybase/client/go/externalstest"
 	"github.com/keybase/client/go/libkb"
 	keybase1 "github.com/keybase/client/go/protocol/keybase1"
@@ -73,6 +75,32 @@ func TestTransactions1(t *testing.T) {
 
 	invites := team.GetActiveAndObsoleteInvites()
 	require.Equal(t, 2, len(invites))
+}
+
+func TestDuplicateUidsInTransactions(t *testing.T) {
+	tc := SetupTest(t, "team", 1)
+	defer tc.Cleanup()
+
+	user := kbtest.TCreateFakeUser(tc)
+	_ = kbtest.TCreateFakeUser(tc)
+
+	teamname := createTeam(tc)
+	team, err := Load(context.Background(), tc.G, keybase1.LoadTeamArg{
+		Name:      teamname,
+		NeedAdmin: true,
+	})
+	require.NoError(t, err)
+
+	tx := CreateAddMemberTx(team)
+	err = tx.AddMemberByUsername(tc.Context(), user.Username, keybase1.TeamRole_WRITER, nil /* botSettings */)
+	require.NoError(t, err)
+	// We are adding the same user again - no error here, though.
+	err = tx.AddMemberByUsername(tc.Context(), user.Username, keybase1.TeamRole_WRITER, nil /* botSettings */)
+	require.NoError(t, err)
+	// But posting won't work with a precheck error
+	err = tx.Post(tc.MetaContext())
+	require.Error(t, err)
+	require.IsType(t, PrecheckAppendError{}, err)
 }
 
 func TestTransactionRotateKey(t *testing.T) {
