@@ -897,8 +897,14 @@ func TestAcceptMultipleInviteLinksExceeded(t *testing.T) {
 		TeamID:  teamID,
 		Seitans: seitans[:],
 	}
-	err = HandleTeamSeitan(context.Background(), tc.G, msg)
+	rejections, err := handleTeamSeitanInternal(tc.MetaContext(), msg)
 	require.NoError(t, err)
+	require.Len(t, rejections, 1)
+	require.Equal(t, user1.GetUID(), rejections[0].UID)
+	require.Equal(t, user1.EldestSeqno, rejections[0].EldestSeqno)
+	require.Equal(t, inviteIDs[1], rejections[0].InviteID)
+	// We should be able to reject this acceptance because server shouldn't have let us post it in the first place.
+	require.Error(t, rejections[0].err)
 
 	// Inspect the team to check if users were added properly.
 	teamObj, err := loadTeamForAdmin(tc, teamName.String())

@@ -566,11 +566,23 @@ type chatSeitanRecip struct {
 func HandleTeamSeitan(ctx context.Context, g *libkb.GlobalContext, msg keybase1.TeamSeitanMsg) (err error) {
 	mctx := libkb.NewMetaContext(libkb.WithLogTag(ctx, "SEIT"), g)
 	defer mctx.Trace("HandleTeamSeitan", &err)()
-	_, err = internalHandleTeamSeitan(mctx, msg)
+	_, err = handleTeamSeitanInternal(mctx, msg)
 	return err
 }
 
-func internalHandleTeamSeitan(mctx libkb.MetaContext, msg keybase1.TeamSeitanMsg) ([]keybase1.TeamSeitanRequest, error) {
+// internalHandleTeamSeitan returns a list of teamInviteAcceptanceRejections
+// for team invite acceptances that have been rejected and if that rejection
+// worked.
+type teamInviteAcceptanceRejections struct {
+	UID         keybase1.UID
+	EldestSeqno keybase1.Seqno
+	InviteID    keybase1.TeamInviteID
+
+	// error from the API server, if there was one
+	err error
+}
+
+func handleTeamSeitanInternal(mctx libkb.MetaContext, msg keybase1.TeamSeitanMsg) ([]teamInviteAcceptanceRejections, error) {
 	team, err := Load(mctx.Ctx(), mctx.G(), keybase1.LoadTeamArg{
 		ID:          msg.TeamID,
 		Public:      msg.TeamID.IsPublic(),
@@ -590,6 +602,8 @@ func internalHandleTeamSeitan(mctx libkb.MetaContext, msg keybase1.TeamSeitanMsg
 	tx := CreateAddMemberTx(team)
 	tx.AllowRoleChanges = true // allow role upgrades using this tx
 
+	// Find invites in team for every request first. We need this to be able to
+	// sort by roles before we start processing the requests.
 	type SeitanRequestWithInvite struct {
 		invite   keybase1.TeamInvite
 		request  keybase1.TeamSeitanRequest
@@ -742,46 +756,59 @@ func internalHandleTeamSeitan(mctx libkb.MetaContext, msg keybase1.TeamSeitanMsg
 		}
 	}
 
-	{
-		// Make list of requests for invite link rejections.
-		var requestsToReject []keybase1.TeamSeitanRequest
-		for _, index := range invitesToReject {
-			if seitans[index].newStyle {
-				requestsToReject = append(requestsToReject, seitans[index].request)
-			}
-		}
-		if err = rejectInviteLinkAcceptances(mctx, requestsToReject); err != nil {
-			// the transaction posted correctly, and rejecting an invite is not a critical step, so just log and swallow the error
-			mctx.Debug("HandleTeamSeitan: error rejecting invite acceptances: %v", err)
+	var requestsToReject []teamInviteAcceptanceRejections
+
+	// Make list of requests for invite link rejections.
+	for _, index := range invitesToReject {
+		seitan := seitans[index]
+		if seitans[index].newStyle {
+			requestsToReject = append(requestsToReject, teamInviteAcceptanceRejections{
+				UID:         seitan.request.Uid,
+				EldestSeqno: seitan.request.EldestSeqno,
+				InviteID:    seitan.invite.Id,
+			})
 		}
 	}
 
-	return nil, nil
+	if len(invitesToReject) > 0 {
+		mctx.Debug("trying to reject %d requests", len(invitesToReject))
+		if err = rejectInviteLinkAcceptances(mctx, requestsToReject); err != nil {
+			// the transaction posted correctly, and rejecting an invite is not a critical step, so just log and swallow the error
+			mctx.Debug("error rejecting invite acceptances: %v", err)
+		}
+	} else {
+		mctx.Debug("no requests to reject")
+	}
+
+	return requestsToReject, nil
 }
 
-func rejectInviteLinkAcceptances(mctx libkb.MetaContext, requests []keybase1.TeamSeitanRequest) error {
+func rejectInviteLinkAcceptances(mctx libkb.MetaContext, rejections []teamInviteAcceptanceRejections) error {
 	failed := 0
 	var lastErr error
-	for _, request := range requests {
+	for i := range rejections {
+		v := &rejections[i]
 		arg := libkb.APIArg{
 			Endpoint:    "team/reject_invite_acceptance",
 			SessionType: libkb.APISessionTypeREQUIRED,
 			Args: libkb.HTTPArgs{
-				"invite_id":    libkb.S{Val: string(request.InviteID)},
-				"uid":          libkb.S{Val: request.Uid.String()},
-				"eldest_seqno": libkb.I{Val: int(request.EldestSeqno)},
+				"invite_id":    libkb.S{Val: string(v.InviteID)},
+				"uid":          libkb.S{Val: v.UID.String()},
+				"eldest_seqno": libkb.I{Val: int(v.EldestSeqno)},
 			},
 		}
 
 		if _, err := mctx.G().API.Post(mctx, arg); err != nil {
 			failed++
-			mctx.Debug("rejectInviteLinkAcceptances: failed to call cancel_invite_acceptance(%v,%v,%v): %s", request.InviteID, request.Uid, request.EldestSeqno, err)
+			mctx.Debug("rejectInviteLinkAcceptances: failed to call cancel_invite_acceptance(%v,%v,%v): %s", v.InviteID, v.UID, v.EldestSeqno, err)
 			lastErr = err
+			v.err = err
 		}
+
 	}
 
 	if failed > 0 {
-		return fmt.Errorf("Failed to reject %v (out of %v) InviteLink Acceptance requests. Last error: %w", failed, len(requests), lastErr)
+		return fmt.Errorf("Failed to reject %v (out of %v) InviteLink Acceptance requests. Last error: %w", failed, len(rejections), lastErr)
 	}
 	return nil
 }
