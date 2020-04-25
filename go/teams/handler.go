@@ -570,16 +570,22 @@ func HandleTeamSeitan(ctx context.Context, g *libkb.GlobalContext, msg keybase1.
 	return err
 }
 
-// internalHandleTeamSeitan returns a list of teamInviteAcceptanceRejections
-// for team invite acceptances that have been rejected and if that rejection
-// worked.
+// teamInviteAcceptanceRejections represents an invite acceptance for new-style
+// invites that should be rejected using API call. Possible reasons for
+// rejections (not exhaustive):
+// - akey can't be verified
+// - user is already in the team with higher or same role
 type teamInviteAcceptanceRejections struct {
+	// Team invite acceptance info needed to do the reject API call:
 	UID         keybase1.UID
 	EldestSeqno keybase1.Seqno
 	InviteID    keybase1.TeamInviteID
 
-	// error from the API server, if there was one
+	// error from the API server, if there was one:
 	err error
+
+	// List of teamInviteAcceptanceRejections is also returned from
+	// handleTeamSeitanInternal for inspection in tests.
 }
 
 func handleTeamSeitanInternal(mctx libkb.MetaContext, msg keybase1.TeamSeitanMsg) ([]teamInviteAcceptanceRejections, error) {
