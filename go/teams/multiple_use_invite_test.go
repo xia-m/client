@@ -850,10 +850,12 @@ func TestAcceptMultipleInviteLinksExceeded(t *testing.T) {
 	maxUses := keybase1.TeamMaxUsesInfinite
 	ilinks[0], err = CreateInvitelink(tc.MetaContext(), teamName.String(),
 		keybase1.TeamRole_READER, maxUses, nil /* etime */)
+	require.NoError(t, err)
 	maxUses, err = keybase1.NewTeamInviteFiniteUses(1)
 	require.NoError(t, err)
 	ilinks[1], err = CreateInvitelink(tc.MetaContext(), teamName.String(),
 		keybase1.TeamRole_WRITER, maxUses, nil /* etime */)
+	require.NoError(t, err)
 
 	// Send the acceptances in the following order:
 	// User 1 accepts invite[0] (READER)
