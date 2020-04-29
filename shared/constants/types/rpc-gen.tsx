@@ -1640,7 +1640,7 @@ export type MessageTypes = {
     outParam: Array<WotVouch> | null
   }
   'keybase.1.wot.wotReact': {
-    inParam: {readonly voucher: String; readonly reaction: WotReactionType}
+    inParam: {readonly voucher: String; readonly sigID: SigID; readonly reaction: WotReactionType}
     outParam: void
   }
   'keybase.1.wot.wotVouch': {
